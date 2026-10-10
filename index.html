@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- viewport-fit=cover lets the layout use the full screen; style.css pads with env(safe-area-inset-*) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- Only same-origin scripts/styles; no inline code, no plugins -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#3b2a20">
+  <!-- iOS home screen app -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Coffee">
+  <title>Coffee Dosing</title>
+  <!-- All paths are relative so the app works under /coffee-app/ on GitHub Pages -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <h1 id="view-title">Ratio</h1>
+  </header>
+
+  <main>
+    <!-- ===== Ratio calculator ===== -->
+    <section id="view-ratio" class="view">
+      <div class="segmented" role="group" aria-label="Brew method">
+        <button type="button" data-mode="espresso" aria-pressed="true">Espresso</button>
+        <button type="button" data-mode="filter" aria-pressed="false">Filter</button>
+      </div>
+
+      <div class="ratio-card" aria-live="polite">
+        <div class="ratio-big" id="ratio-big">1:2</div>
+        <div class="ratio-summary" id="ratio-summary"></div>
+      </div>
+
+      <div class="card">
+        <label class="field">
+          <span class="label">Dose (coffee)</span>
+          <span class="input-unit">
+            <input id="calc-dose" data-field="dose" type="text" inputmode="decimal" autocomplete="off">
+            <span class="unit">g</span>
+          </span>
+        </label>
+        <label class="field">
+          <span class="label" id="calc-target-label">Yield (in cup)</span>
+          <span class="input-unit">
+            <input id="calc-target" data-field="target" type="text" inputmode="decimal" autocomplete="off">
+            <span class="unit">g</span>
+          </span>
+        </label>
+        <label class="field">
+          <span class="label">Ratio</span>
+          <span class="input-unit">
+            <span class="unit">1:</span>
+            <input id="calc-ratio" data-field="ratio" type="text" inputmode="decimal" autocomplete="off">
+            <span class="unit"></span>
+          </span>
+        </label>
+        <label class="field filter-only" hidden>
+          <span class="label">Absorption</span>
+          <span class="input-unit">
+            <input id="calc-absorption" data-field="absorption" type="text" inputmode="decimal" autocomplete="off">
+            <span class="unit">g/g</span>
+          </span>
+          <small class="muted">Water retained by the grounds, about 2 g per g of coffee.</small>
+        </label>
+      </div>
+
+      <p class="hint" id="calc-hint" role="status"></p>
+      <p class="muted small">Changing the dose keeps the ratio. Changing yield/water or the ratio updates the other one.</p>
+      <button type="button" id="calc-to-note" class="btn block">Log as brew note</button>
+    </section>
+
+    <!-- ===== Grinders ===== -->
+    <section id="view-grinders" class="view" hidden>
+      <button type="button" id="add-grinder" class="btn primary block">+ Add grinder</button>
+      <ul id="grinder-list" class="card-list"></ul>
+      <p id="grinder-empty" class="empty">No grinders yet.</p>
+    </section>
+
+    <!-- ===== Brew notes ===== -->
+    <section id="view-notes" class="view" hidden>
+      <button type="button" id="add-note" class="btn primary block">+ Add brew note</button>
+      <ul id="note-list" class="card-list"></ul>
+      <p id="note-empty" class="empty">No brew notes yet.</p>
+    </section>
+
+    <!-- ===== Data / backup ===== -->
+    <section id="view-data" class="view" hidden>
+      <div class="card">
+        <h2>Backup</h2>
+        <p class="muted">Your data is stored only on this device. Export a backup now and then.</p>
+        <button type="button" id="export-btn" class="btn primary block">Export backup (JSON)</button>
+        <button type="button" id="import-btn" class="btn block">Import backup…</button>
+        <input type="file" id="import-file" accept="application/json,.json" hidden>
+      </div>
+      <div class="card">
+        <h2>Status</h2>
+        <dl id="data-status" class="status"></dl>
+      </div>
+    </section>
+  </main>
+
+  <div id="banner" class="banner" role="status" hidden></div>
+
+  <nav class="tabbar" aria-label="Sections">
+    <button type="button" data-view="ratio"><span class="icon" aria-hidden="true">⚖️</span>Ratio</button>
+    <button type="button" data-view="grinders"><span class="icon" aria-hidden="true">⚙️</span>Grinders</button>
+    <button type="button" data-view="notes"><span class="icon" aria-hidden="true">📝</span>Notes</button>
+    <button type="button" data-view="data"><span class="icon" aria-hidden="true">💾</span>Data</button>
+  </nav>
+
+  <!-- ===== Grinder editor ===== -->
+  <dialog id="grinder-dialog" aria-labelledby="grinder-dialog-title">
+    <form id="grinder-form" novalidate>
+      <h2 id="grinder-dialog-title">Grinder</h2>
+      <label class="field">
+        <span class="label">Name</span>
+        <input name="name" type="text" maxlength="100" autocomplete="off" required>
+      </label>
+      <label class="field">
+        <span class="label">Settings (one per line)</span>
+        <textarea name="settings" rows="6" placeholder="Espresso: 14&#10;V60: 22 clicks"></textarea>
+      </label>
+      <p class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ===== Brew note editor ===== -->
+  <dialog id="note-dialog" aria-labelledby="note-dialog-title">
+    <form id="note-form" novalidate>
+      <h2 id="note-dialog-title">Brew note</h2>
+      <label class="field">
+        <span class="label">Date</span>
+        <input name="date" type="date" required>
+      </label>
+      <label class="field">
+        <span class="label">Grinder</span>
+        <select name="grinderId"></select>
+      </label>
+      <label class="field">
+        <span class="label">Grind setting</span>
+        <input name="grindSetting" type="text" list="grind-setting-options" maxlength="100" autocomplete="off">
+      </label>
+      <datalist id="grind-setting-options"></datalist>
+      <div class="row">
+        <label class="field">
+          <span class="label">Dose (g)</span>
+          <input name="dose" type="text" inputmode="decimal" autocomplete="off">
+        </label>
+        <label class="field">
+          <span class="label">Yield (g)</span>
+          <input name="yield" type="text" inputmode="decimal" autocomplete="off">
+        </label>
+      </div>
+      <label class="field">
+        <span class="label">Time (seconds or m:ss)</span>
+        <input name="time" type="text" autocomplete="off" placeholder="28 or 3:30">
+      </label>
+      <p class="muted small" id="note-ratio"></p>
+      <fieldset class="rating">
+        <legend class="label">Rating</legend>
+        <label><input type="radio" name="rating" value="" checked><span aria-label="No rating">–</span></label>
+        <label><input type="radio" name="rating" value="1"><span>1</span></label>
+        <label><input type="radio" name="rating" value="2"><span>2</span></label>
+        <label><input type="radio" name="rating" value="3"><span>3</span></label>
+        <label><input type="radio" name="rating" value="4"><span>4</span></label>
+        <label><input type="radio" name="rating" value="5"><span>5</span></label>
+      </fieldset>
+      <label class="field">
+        <span class="label">Notes</span>
+        <textarea name="text" rows="4" maxlength="5000"></textarea>
+      </label>
+      <p class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
