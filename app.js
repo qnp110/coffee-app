@@ -110,8 +110,26 @@ function str(value, max) {
 
 /* ======================================================================
    Storage
+   Everything lives in localStorage[STORAGE_KEY] as one JSON object:
+
+   {
+     schemaVersion: 1,
+     calc: {                         // last calculator values, per mode
+       mode: 'espresso' | 'filter',
+       espresso: { dose, yield, ratio },
+       filter:   { dose, water, ratio, absorption }
+     },
+     grinders: [ { id, name, settings: ['Espresso: 14', ...] } ],
+     notes: [ { id, date: 'YYYY-MM-DD', grinderId, grinderName, dose, yield,
+                time, grindSetting, rating, text, createdAt } ]
+   }
+
+   Units: masses in g, note time in s, createdAt in ms since 1970. rating is 1-5 or null.
+   Empty optional numbers are stored as null.
+   Bump SCHEMA_VERSION and add a migration in normalizeData() if this shape changes.
    ====================================================================== */
 
+// The in-memory copy of the data; every change is written back with saveData().
 let data = defaultData();
 // If stored data exists but cannot be read, we keep the raw string here and pause saving,
 // so a bug or a newer app version can never silently overwrite your data.
@@ -268,6 +286,8 @@ async function requestPersistence() {
    estimated yield = water - absorption * dose (grounds retain water).
    ====================================================================== */
 
+// The calculator's <input> elements keyed by field name (dose, target, ratio, absorption); filled in init().
+// "target" is the yield input in espresso mode and the water input in filter mode.
 const calcInputs = {};
 
 /** Current mode's calculator values. */
@@ -411,6 +431,7 @@ function calcToNote() {
    Grinders
    ====================================================================== */
 
+// id of the grinder open in the editor dialog, or null when adding a new one.
 let editingGrinderId = null;
 
 /** Render the grinder list. */
@@ -469,6 +490,7 @@ function deleteGrinder(g) {
    Brew notes
    ====================================================================== */
 
+// id of the note open in the editor dialog, or null when adding a new one.
 let editingNoteId = null;
 
 /** Display name of a note's grinder: current name, or the saved snapshot if it was deleted. */
@@ -680,8 +702,9 @@ function renderDataStatus() {
    App shell: tabs, banner, service worker
    ====================================================================== */
 
+// Header title per tab (keys match data-view on the tab buttons and the view-* section ids).
 const VIEW_TITLES = { ratio: 'Ratio', grinders: 'Grinders', notes: 'Brew notes', data: 'Data' };
-let bannerTimer = null;
+let bannerTimer = null; // auto-hide timer for info banners
 
 /** Show one tab's view and hide the others. */
 function showView(name) {
