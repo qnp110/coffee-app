@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the placeholder app icons (a cream coffee bean on dark brown) as PNG files.
+"""Generate the placeholder app icons (a brown coffee bean on a pastel peach-to-lavender gradient) as PNG files.
 
 Pure standard library (zlib + struct), so no Pillow is needed.
 Run from the repo root:  python3 tools/make_icons.py
@@ -10,8 +10,9 @@ import struct
 import zlib
 from pathlib import Path
 
-BG = (59, 42, 32)      # #3b2a20, matches theme_color in manifest.json
-BEAN = (232, 211, 176)  # #e8d3b0, cream
+BG_TOP = (247, 211, 191)     # #f7d3bf, pastel peach (--peach in style.css)
+BG_BOTTOM = (224, 219, 245)  # #e0dbf5, pastel lavender (--lavender in style.css)
+BEAN = (107, 72, 54)         # #6b4836, warm coffee brown
 SUPERSAMPLE = 3          # 3x3 samples per pixel for smooth (anti-aliased) edges
 
 # Bean geometry in normalised coordinates (0..1). The bean stays inside the central
@@ -41,14 +42,17 @@ def render(size: int) -> bytes:
     n = SUPERSAMPLE
     for py in range(size):
         row = bytearray([0])  # PNG filter type "None"
+        # Vertical gradient: linear blend from BG_TOP (first row) to BG_BOTTOM (last row).
+        s = py / (size - 1)
+        bg = [top * (1 - s) + bottom * s for top, bottom in zip(BG_TOP, BG_BOTTOM)]
         for px in range(size):
-            # Fraction of sub-samples that hit the bean -> blend factor between BG and BEAN.
+            # Fraction of sub-samples that hit the bean -> blend factor between background and BEAN.
             hits = sum(
                 is_bean((px + (i + 0.5) / n) / size, (py + (j + 0.5) / n) / size)
                 for i in range(n) for j in range(n)
             )
             t = hits / (n * n)
-            row.extend(round(b * (1 - t) + f * t) for b, f in zip(BG, BEAN))
+            row.extend(round(b * (1 - t) + f * t) for b, f in zip(bg, BEAN))
         rows.append(bytes(row))
     return b"".join(rows)
 

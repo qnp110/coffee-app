@@ -1,7 +1,7 @@
 /* Coffee Dosing PWA: plain JavaScript, no build step.
  *
- * Sections: constants & helpers, storage, ratio calculator, grinders, brew notes,
- * backup (export/import), app shell (tabs, banner, service worker), init.
+ * Sections: constants & helpers, storage (incl. schema migrations), ratio calculator, beans,
+ * brew notes, backup (export/import), app shell (tabs, banner, service worker), init.
  *
  * Safety rule: user text is only ever inserted with textContent / text nodes (see el()),
  * never via innerHTML.
@@ -14,7 +14,7 @@
 
 // One namespaced key: every *.github.io project site shares the same origin and localStorage.
 const STORAGE_KEY = 'coffee-app:data';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 
 // Upper bounds for numbers (all must also be > 0). Masses in g, time in s.
@@ -108,25 +108,33 @@ function str(value, max) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
 
+/** Split multi-line text into a clean list (one entry per non-empty line, max 100 entries). */
+function lines(text) {
+  return String(text).split('\n').map((s) => str(s, TEXT_MAX.setting)).filter(Boolean).slice(0, 100);
+}
+
 /* ======================================================================
    Storage
-   Everything lives in localStorage[STORAGE_KEY] as one JSON object:
+   Everything lives in localStorage[STORAGE_KEY] as one JSON object (schema version 2):
 
    {
-     schemaVersion: 1,
+     schemaVersion: 2,
      calc: {                         // last calculator values, per mode
        mode: 'espresso' | 'filter',
        espresso: { dose, yield, ratio },
        filter:   { dose, water, ratio, absorption }
      },
-     grinders: [ { id, name, settings: ['Espresso: 14', ...] } ],
-     notes: [ { id, date: 'YYYY-MM-DD', grinderId, grinderName, dose, yield,
-                time, grindSetting, rating, text, createdAt } ]
+     beans: [ { id, name, grinder, settings: ['Espresso: 14', ...], info, notes } ],
+     notes: [ { id, date: 'YYYY-MM-DD', beanId, beanName, grinder, grindSetting,
+                dose, yield, time, rating, text, createdAt } ]
    }
 
    Units: masses in g, note time in s, createdAt in ms since 1970. rating is 1-5 or null.
-   Empty optional numbers are stored as null.
-   Bump SCHEMA_VERSION and add a migration in normalizeData() if this shape changes.
+   Empty optional numbers are stored as null. A note's beanName and grinder are snapshots taken
+   when it was saved, so the note still reads correctly after the bean is renamed, changed or deleted.
+
+   Changing this shape: bump SCHEMA_VERSION and add a migrateVxToVy() step in normalizeData(),
+   so existing data and old backups are upgraded instead of lost.
    ====================================================================== */
 
 // The in-memory copy of the data; every change is written back with saveData().
@@ -138,7 +146,7 @@ let persistStatus = 'checking…';
 
 /** Fresh, empty app data. */
 function defaultData() {
-  return { schemaVersion: SCHEMA_VERSION, calc: defaultCalc(), grinders: [], notes: [] };
+  return { schemaVersion: SCHEMA_VERSION, calc: defaultCalc(), beans: [], notes: [] };
 }
 
 /** Default calculator values. Ratio means yield/dose (espresso) or water/dose (filter). */
@@ -161,7 +169,14 @@ function loadData() {
   }
   if (raw === null) return defaultData();
   try {
-    return normalizeData(JSON.parse(raw)).data;
+    const parsed = JSON.parse(raw);
+    const { data: loaded } = normalizeData(parsed);
+    // Write back right away if an older schema was upgraded, so the migration runs only once.
+    if (parsed.schemaVersion !== SCHEMA_VERSION) {
+      data = loaded;
+      saveData();
+    }
+    return loaded;
   } catch (err) {
     blockedRaw = raw;
     showBanner(`Saved data could not be read (${err.message}). Saving is paused so nothing is overwritten. See the Data tab.`, 'error');
@@ -185,7 +200,7 @@ function saveData() {
 }
 
 /**
- * Validate and clean untrusted data (from storage or an imported file).
+ * Validate, migrate and clean untrusted data (from storage or an imported file).
  * Fatal problems throw; individual bad entries are dropped and counted.
  * @returns {{data: object, skipped: number}}
  */
@@ -194,13 +209,35 @@ function normalizeData(obj) {
   const version = obj.schemaVersion;
   if (!Number.isInteger(version) || version < 1) throw new Error('missing or invalid schemaVersion');
   if (version > SCHEMA_VERSION) throw new Error(`schema version ${version} is newer than this app supports (${SCHEMA_VERSION})`);
-  // Future schema migrations go here, e.g. if (version < 2) obj = migrateV1toV2(obj);
-  if (!Array.isArray(obj.grinders) || !Array.isArray(obj.notes)) throw new Error('grinders or notes list missing');
 
-  const grinders = uniqueIds(obj.grinders.map(normalizeGrinder).filter(Boolean));
+  // Migrations run one version step at a time, so data of any older version reaches the current one.
+  if (version < 2) obj = migrateV1toV2(obj);
+
+  if (!Array.isArray(obj.beans) || !Array.isArray(obj.notes)) throw new Error('beans or notes list missing');
+  const beans = uniqueIds(obj.beans.map(normalizeBean).filter(Boolean));
   const notes = uniqueIds(obj.notes.map(normalizeNote).filter(Boolean));
-  const skipped = (obj.grinders.length - grinders.length) + (obj.notes.length - notes.length);
-  return { data: { schemaVersion: SCHEMA_VERSION, calc: normalizeCalc(obj.calc), grinders, notes }, skipped };
+  const skipped = (obj.beans.length - beans.length) + (obj.notes.length - notes.length);
+  return { data: { schemaVersion: SCHEMA_VERSION, calc: normalizeCalc(obj.calc), beans, notes }, skipped };
+}
+
+/**
+ * Schema v1 -> v2: the "grinders" list was replaced by "beans".
+ * Each old grinder becomes a bean named "Unnamed bean" that keeps the grinder name and settings
+ * (and the same id, so old notes stay linked). Notes get beanId/beanName/grinder from their old grinder fields.
+ */
+function migrateV1toV2(obj) {
+  if (!Array.isArray(obj.grinders) || !Array.isArray(obj.notes)) throw new Error('grinders or notes list missing');
+  const isObject = (x) => x !== null && typeof x === 'object';
+  return {
+    schemaVersion: 2,
+    calc: obj.calc,
+    beans: obj.grinders.map((g) => (isObject(g)
+      ? { id: g.id, name: 'Unnamed bean', grinder: g.name, settings: g.settings, info: '', notes: '' }
+      : null)),
+    notes: obj.notes.map((n) => (isObject(n)
+      ? { ...n, beanId: n.grinderId, beanName: n.grinderId ? 'Unnamed bean' : '', grinder: n.grinderName }
+      : null)),
+  };
 }
 
 /** Give any duplicate ids a fresh id so edit/delete always target exactly one entry. */
@@ -213,13 +250,19 @@ function uniqueIds(items) {
   return items;
 }
 
-/** Clean one grinder, or return null if it has no name. */
-function normalizeGrinder(g) {
-  if (!g || typeof g !== 'object') return null;
-  const name = str(g.name, TEXT_MAX.short);
+/** Clean one bean, or return null if it has no name. */
+function normalizeBean(b) {
+  if (!b || typeof b !== 'object') return null;
+  const name = str(b.name, TEXT_MAX.short);
   if (!name) return null;
-  const settings = Array.isArray(g.settings) ? g.settings.map((s) => str(s, TEXT_MAX.setting)).filter(Boolean).slice(0, 100) : [];
-  return { id: str(g.id, 100) || newId(), name, settings };
+  return {
+    id: str(b.id, 100) || newId(),
+    name,
+    grinder: str(b.grinder, TEXT_MAX.short),
+    settings: Array.isArray(b.settings) ? b.settings.map((s) => str(s, TEXT_MAX.setting)).filter(Boolean).slice(0, 100) : [],
+    info: str(b.info, TEXT_MAX.text),
+    notes: str(b.notes, TEXT_MAX.text),
+  };
 }
 
 /** Clean one brew note, or return null if it has no valid date. Invalid numbers become null. */
@@ -229,12 +272,13 @@ function normalizeNote(n) {
   return {
     id: str(n.id, 100) || newId(),
     date: n.date,
-    grinderId: str(n.grinderId, 100) || null,
-    grinderName: str(n.grinderName, TEXT_MAX.short), // snapshot, shown if the grinder is deleted
+    beanId: str(n.beanId, 100) || null,
+    beanName: str(n.beanName, TEXT_MAX.short),
+    grinder: str(n.grinder, TEXT_MAX.short),
+    grindSetting: str(n.grindSetting, TEXT_MAX.short),
     dose: num(n.dose, LIMITS.dose),
     yield: num(n.yield, LIMITS.mass),
     time: num(n.time, LIMITS.time),
-    grindSetting: str(n.grindSetting, TEXT_MAX.short),
     rating: Number.isInteger(n.rating) && n.rating >= 1 && n.rating <= 5 ? n.rating : null,
     text: str(n.text, TEXT_MAX.text),
     createdAt: Number.isFinite(n.createdAt) ? n.createdAt : 0,
@@ -270,12 +314,12 @@ async function requestPersistence() {
   try {
     if (navigator.storage && navigator.storage.persist) {
       const granted = (await navigator.storage.persisted()) || (await navigator.storage.persist());
-      persistStatus = granted ? 'granted' : 'not granted (export backups regularly)';
+      persistStatus = granted ? 'Granted' : 'Not granted';
     } else {
-      persistStatus = 'not supported (export backups regularly)';
+      persistStatus = 'Not supported';
     }
   } catch {
-    persistStatus = 'unknown';
+    persistStatus = 'Unknown';
   }
   renderDataStatus();
 }
@@ -365,7 +409,7 @@ function renderCalc(activeInput = null) {
 
   $$('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
   $$('.filter-only').forEach((node) => { node.hidden = mode !== 'filter'; });
-  $('#calc-target-label').textContent = mode === 'espresso' ? 'Yield (in cup)' : 'Brew water';
+  $('#calc-target-label').textContent = mode === 'espresso' ? 'Yield' : 'Water';
 
   const setValue = (input, value, digits) => {
     if (input === activeInput) return;
@@ -382,10 +426,10 @@ function renderCalc(activeInput = null) {
   $('#ratio-big').textContent = okRatio ? `1:${fmt(s.ratio, 2)}` : '1:–';
   const g = (n, digits = 1) => (isPos(n, LIMITS.mass) ? `${fmt(n, digits)} g` : '– g');
   if (mode === 'espresso') {
-    $('#ratio-summary').textContent = `${g(s.dose)} coffee → ${g(s.yield)} in cup`;
+    $('#ratio-summary').textContent = `${g(s.dose)} coffee → ${g(s.yield)} in the cup`;
   } else {
     const y = filterYield(s);
-    $('#ratio-summary').textContent = `${g(s.dose)} coffee + ${g(s.water, 0)} water ≈ ${y === null ? '–' : fmt(y, 0)} g in cup`;
+    $('#ratio-summary').textContent = `${g(s.dose)} coffee + ${g(s.water, 0)} water ≈ ${y === null ? '–' : fmt(y, 0)} g in the cup`;
   }
 
   $('#calc-hint').textContent = calcHint(s, t);
@@ -428,61 +472,82 @@ function calcToNote() {
 }
 
 /* ======================================================================
-   Grinders
+   Beans
    ====================================================================== */
 
-// id of the grinder open in the editor dialog, or null when adding a new one.
-let editingGrinderId = null;
+// id of the bean open in the editor sheet, or null when adding a new one.
+let editingBeanId = null;
 
-/** Render the grinder list. */
-function renderGrinders() {
-  $('#grinder-list').replaceChildren(...data.grinders.map((g) => el('li', { class: 'card' },
-    el('h3', {}, g.name),
-    g.settings.length
-      ? el('ul', { class: 'settings' }, g.settings.map((s) => el('li', {}, s)))
-      : el('p', { class: 'muted' }, 'No settings yet.'),
-    el('div', { class: 'card-actions' },
-      el('button', { type: 'button', class: 'btn', 'aria-label': `Edit ${g.name}`, onclick: () => openGrinderDialog(g) }, 'Edit'),
-      el('button', { type: 'button', class: 'btn danger', 'aria-label': `Delete ${g.name}`, onclick: () => deleteGrinder(g) }, 'Delete')),
+/** Render the bean list; tapping a card opens its editor. */
+function renderBeans() {
+  $('#bean-list').replaceChildren(...data.beans.map((b) => el('li', {},
+    el('button', { type: 'button', class: 'card', onclick: () => openBeanDialog(b) },
+      el('span', { class: 'card-title' }, b.name),
+      b.grinder ? el('span', { class: 'card-sub' }, b.grinder) : null,
+      b.settings.length ? el('span', { class: 'chips' }, b.settings.map((s) => el('span', { class: 'chip' }, s))) : null,
+      b.info ? [el('span', { class: 'card-label' }, 'Bean info'), el('span', { class: 'card-text' }, b.info)] : null,
+      b.notes ? [el('span', { class: 'card-label' }, 'Notes'), el('span', { class: 'card-text' }, b.notes)] : null,
+    ),
   )));
-  $('#grinder-empty').hidden = data.grinders.length > 0;
+  $('#bean-empty').hidden = data.beans.length > 0;
 }
 
-/** Open the grinder editor (g = null to add a new grinder). */
-function openGrinderDialog(g = null) {
-  const form = $('#grinder-form');
-  editingGrinderId = g ? g.id : null;
-  $('#grinder-dialog-title').textContent = g ? 'Edit grinder' : 'New grinder';
-  form.elements.name.value = g ? g.name : '';
-  form.elements.settings.value = g ? g.settings.join('\n') : '';
+/** All grinder names used so far (beans and notes), for the grinder suggestions. */
+function knownGrinders() {
+  const names = [...data.beans.map((b) => b.grinder), ...data.notes.map((n) => n.grinder)].filter(Boolean);
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+}
+
+/** Open the bean editor (b = null to add a new bean). */
+function openBeanDialog(b = null) {
+  const form = $('#bean-form');
+  editingBeanId = b ? b.id : null;
+  $('#bean-dialog-title').textContent = b ? 'Edit bean' : 'New bean';
+  form.elements.name.value = b ? b.name : '';
+  form.elements.grinder.value = b ? b.grinder : '';
+  form.elements.settings.value = b ? b.settings.join('\n') : '';
+  form.elements.info.value = b ? b.info : '';
+  form.elements.notes.value = b ? b.notes : '';
+  $('#grinder-options').replaceChildren(...knownGrinders().map((g) => el('option', { value: g })));
+  form.querySelector('.edit-only').hidden = !b;
   setFormError(form, '');
-  $('#grinder-dialog').showModal();
+  openSheet('#bean-dialog');
 }
 
-/** Validate and save the grinder form. */
-function onGrinderSubmit(event) {
+/** Validate and save the bean form. */
+function onBeanSubmit(event) {
   event.preventDefault();
   const form = event.target;
-  const name = str(form.elements.name.value, TEXT_MAX.short);
-  if (!name) return setFormError(form, 'Please enter a name.');
-  const settings = form.elements.settings.value.split('\n').map((s) => str(s, TEXT_MAX.setting)).filter(Boolean).slice(0, 100);
+  const f = form.elements;
+  const name = str(f.name.value, TEXT_MAX.short);
+  if (!name) return setFormError(form, 'Please enter a name for the bean.');
 
-  const existing = data.grinders.find((g) => g.id === editingGrinderId);
-  if (existing) Object.assign(existing, { name, settings });
-  else data.grinders.push({ id: newId(), name, settings });
+  const bean = {
+    name,
+    grinder: str(f.grinder.value, TEXT_MAX.short),
+    settings: lines(f.settings.value),
+    info: str(f.info.value, TEXT_MAX.text),
+    notes: str(f.notes.value, TEXT_MAX.text),
+  };
+  const existing = data.beans.find((b) => b.id === editingBeanId);
+  if (existing) Object.assign(existing, bean);
+  else data.beans.push({ id: newId(), ...bean });
 
   saveData();
-  $('#grinder-dialog').close();
+  $('#bean-dialog').close();
   renderAll();
 }
 
-/** Delete a grinder after confirmation. Notes keep the grinder's name as a snapshot. */
-function deleteGrinder(g) {
-  const used = data.notes.filter((n) => n.grinderId === g.id).length;
+/** Delete the bean open in the editor, after confirmation. Notes keep the bean's name as a snapshot. */
+function deleteBean() {
+  const bean = data.beans.find((b) => b.id === editingBeanId);
+  if (!bean) return;
+  const used = data.notes.filter((n) => n.beanId === bean.id).length;
   const extra = used ? `\n\n${used} brew note(s) use it; they will keep showing its name.` : '';
-  if (!confirm(`Delete grinder "${g.name}"?${extra}`)) return;
-  data.grinders = data.grinders.filter((x) => x.id !== g.id);
+  if (!confirm(`Delete "${bean.name}"?${extra}`)) return;
+  data.beans = data.beans.filter((b) => b.id !== bean.id);
   saveData();
+  $('#bean-dialog').close();
   renderAll();
 }
 
@@ -490,37 +555,62 @@ function deleteGrinder(g) {
    Brew notes
    ====================================================================== */
 
-// id of the note open in the editor dialog, or null when adding a new one.
+// id of the note open in the editor sheet, or null when adding a new one.
 let editingNoteId = null;
 
-/** Display name of a note's grinder: current name, or the saved snapshot if it was deleted. */
-function noteGrinderName(n) {
-  const g = data.grinders.find((x) => x.id === n.grinderId);
-  return g ? g.name : n.grinderName;
+/** Sort order for notes: newest date first, then most recently created. */
+function compareNotes(a, b) {
+  return b.date.localeCompare(a.date) || b.createdAt - a.createdAt;
 }
 
-/** Render brew notes, newest first (by date, then by creation time). */
-function renderNotes() {
-  const sorted = [...data.notes].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
-  $('#note-list').replaceChildren(...sorted.map((n) => {
-    const grinder = noteGrinderName(n);
-    const numbers = [
-      n.dose !== null || n.yield !== null ? `${n.dose !== null ? fmt(n.dose) : '–'} g → ${n.yield !== null ? fmt(n.yield) : '–'} g` : null,
-      n.dose !== null && n.yield !== null ? `1:${fmt(n.yield / n.dose, 2)}` : null,
-      n.time !== null ? fmtTime(n.time) : null,
-    ].filter(Boolean).join(' · ');
-    const grinderLine = [grinder, n.grindSetting].filter(Boolean).join(' · ');
+/** Display name of a note's bean: its current name, or the saved snapshot if it was deleted. */
+function noteBeanName(n) {
+  const bean = data.beans.find((b) => b.id === n.beanId);
+  return bean ? bean.name : n.beanName;
+}
 
-    return el('li', { class: 'card' },
-      el('div', { class: 'note-head' },
-        el('h3', {}, fmtDate(n.date)),
-        n.rating ? el('span', { class: 'stars', 'aria-label': `Rating ${n.rating} of 5` }, '★'.repeat(n.rating) + '☆'.repeat(5 - n.rating)) : null),
-      grinderLine ? el('p', { class: 'note-meta muted' }, grinderLine) : null,
-      numbers ? el('p', { class: 'note-meta' }, numbers) : null,
-      n.text ? el('p', { class: 'note-text' }, n.text) : null,
-      el('div', { class: 'card-actions' },
-        el('button', { type: 'button', class: 'btn', onclick: () => openNoteDialog(n) }, 'Edit'),
-        el('button', { type: 'button', class: 'btn danger', onclick: () => deleteNote(n) }, 'Delete')),
+/**
+ * Grinder to record for a note with the given bean. When editing a note whose bean is unchanged,
+ * keep its snapshot (the grinder actually used back then); otherwise take the bean's current grinder.
+ */
+function grinderForNote(beanId) {
+  const existing = data.notes.find((n) => n.id === editingNoteId);
+  if (existing && existing.beanId === beanId && existing.grinder) return existing.grinder;
+  const bean = data.beans.find((b) => b.id === beanId);
+  return bean ? bean.grinder : '';
+}
+
+/** Bean to preselect for a new note: the one from the newest note, else the first bean. */
+function defaultBeanId() {
+  const newest = [...data.notes].sort(compareNotes)[0];
+  if (newest && data.beans.some((b) => b.id === newest.beanId)) return newest.beanId;
+  return data.beans.length ? data.beans[0].id : null;
+}
+
+/** Render brew notes, newest first; tapping a card opens its editor. */
+function renderNotes() {
+  $('#note-list').replaceChildren(...[...data.notes].sort(compareNotes).map((n) => {
+    const beanName = noteBeanName(n);
+    const grinderLine = [n.grinder, n.grindSetting].filter(Boolean).join(' · ');
+    const stats = [
+      n.dose !== null ? ['Dose', `${fmt(n.dose)} g`] : null,
+      n.yield !== null ? ['Yield', `${fmt(n.yield)} g`] : null,
+      n.dose !== null && n.yield !== null ? ['Ratio', `1:${fmt(n.yield / n.dose, 2)}`] : null,
+      n.time !== null ? ['Time', fmtTime(n.time)] : null,
+    ].filter(Boolean);
+
+    return el('li', {},
+      el('button', { type: 'button', class: 'card', onclick: () => openNoteDialog(n) },
+        el('span', { class: 'card-top' },
+          el('span', { class: 'card-title' }, fmtDate(n.date)),
+          n.rating ? el('span', { class: 'stars', role: 'img', 'aria-label': `Rating ${n.rating} of 5` }, '★'.repeat(n.rating) + '☆'.repeat(5 - n.rating)) : null),
+        beanName ? el('span', { class: 'chips' }, el('span', { class: 'chip lavender' }, beanName)) : null,
+        grinderLine ? el('span', { class: 'card-sub' }, grinderLine) : null,
+        stats.length ? el('span', { class: 'stats' }, stats.map(([label, value]) => el('span', { class: 'stat' },
+          el('span', { class: 'stat-label' }, label),
+          el('span', { class: 'stat-value' }, value)))) : null,
+        n.text ? el('span', { class: 'card-text' }, n.text) : null,
+      ),
     );
   }));
   $('#note-empty').hidden = data.notes.length > 0;
@@ -533,41 +623,43 @@ function renderNotes() {
  */
 function openNoteDialog(n = null, prefill = {}) {
   const form = $('#note-form');
-  const src = n || { date: todayISO(), grinderId: data.grinders[0]?.id ?? null, grindSetting: '', dose: null, yield: null, time: null, rating: null, text: '', ...prefill };
+  const f = form.elements;
+  const src = n || { date: todayISO(), beanId: defaultBeanId(), beanName: '', grindSetting: '', dose: null, yield: null, time: null, rating: null, text: '', ...prefill };
   editingNoteId = n ? n.id : null;
   $('#note-dialog-title').textContent = n ? 'Edit brew note' : 'New brew note';
 
-  // Grinder options; keep a deleted grinder selectable so editing doesn't lose it.
-  const select = form.elements.grinderId;
-  const options = [el('option', { value: '' }, '— none —'), ...data.grinders.map((g) => el('option', { value: g.id }, g.name))];
-  if (src.grinderId && !data.grinders.some((g) => g.id === src.grinderId)) {
-    options.push(el('option', { value: src.grinderId }, `${src.grinderName || 'Unknown'} (deleted)`));
+  // Bean options; keep a deleted bean selectable so editing the note doesn't lose it.
+  const options = [el('option', { value: '' }, 'None'), ...data.beans.map((b) => el('option', { value: b.id }, b.name))];
+  if (src.beanId && !data.beans.some((b) => b.id === src.beanId)) {
+    options.push(el('option', { value: src.beanId }, `${src.beanName || 'Unknown'} (deleted)`));
   }
-  select.replaceChildren(...options);
-  select.value = src.grinderId || '';
+  f.beanId.replaceChildren(...options);
+  f.beanId.value = src.beanId || '';
 
-  form.elements.date.value = src.date;
-  form.elements.grindSetting.value = src.grindSetting || '';
-  form.elements.dose.value = fmt(src.dose);
-  form.elements.yield.value = fmt(src.yield);
+  f.date.value = src.date;
+  f.grindSetting.value = src.grindSetting || '';
+  f.dose.value = fmt(src.dose);
+  f.yield.value = fmt(src.yield);
   // Show times of a minute or more as m:ss (parseTime accepts both forms).
-  form.elements.time.value = src.time === null ? '' : src.time >= 60 ? fmtTime(src.time) : String(Math.round(src.time));
-  form.elements.rating.value = src.rating ? String(src.rating) : '';
-  form.elements.text.value = src.text || '';
+  f.time.value = src.time === null ? '' : src.time >= 60 ? fmtTime(src.time) : String(Math.round(src.time));
+  f.rating.value = src.rating ? String(src.rating) : '';
+  f.text.value = src.text || '';
+  form.querySelector('.edit-only').hidden = !n;
   setFormError(form, '');
   updateNoteForm();
-  $('#note-dialog').showModal();
+  openSheet('#note-dialog');
 }
 
-/** Refresh the grind-setting suggestions and the live ratio in the note form. */
+/** Refresh the derived parts of the note form: grinder, grind setting suggestions and ratio. */
 function updateNoteForm() {
-  const form = $('#note-form');
-  const g = data.grinders.find((x) => x.id === form.elements.grinderId.value);
-  $('#grind-setting-options').replaceChildren(...(g ? g.settings : []).map((s) => el('option', { value: s })));
+  const f = $('#note-form').elements;
+  const bean = data.beans.find((b) => b.id === f.beanId.value);
+  $('#note-grinder').textContent = grinderForNote(f.beanId.value || null) || '–';
+  $('#grind-setting-options').replaceChildren(...(bean ? bean.settings : []).map((s) => el('option', { value: s })));
 
-  const dose = parseNum(form.elements.dose.value);
-  const yld = parseNum(form.elements.yield.value);
-  $('#note-ratio').textContent = isPos(dose, LIMITS.dose) && isPos(yld, LIMITS.mass) ? `Ratio 1:${fmt(yld / dose, 2)}` : '';
+  const dose = parseNum(f.dose.value);
+  const yld = parseNum(f.yield.value);
+  $('#note-ratio').textContent = isPos(dose, LIMITS.dose) && isPos(yld, LIMITS.mass) ? `1:${fmt(yld / dose, 2)}` : '–';
 }
 
 /** Validate and save the note form. */
@@ -591,18 +683,20 @@ function onNoteSubmit(event) {
   const time = optional(parseTime(f.time.value), LIMITS.time, 'a time like 28 or 3:30');
   if (errors.length) return setFormError(form, `Please enter ${errors.join(', ')}.`);
 
-  const grinderId = f.grinderId.value || null;
+  const beanId = f.beanId.value || null;
+  const bean = data.beans.find((b) => b.id === beanId);
   const existing = data.notes.find((n) => n.id === editingNoteId);
-  const grinder = data.grinders.find((g) => g.id === grinderId);
   const note = {
     id: existing ? existing.id : newId(),
     date,
-    grinderId,
-    grinderName: grinder ? grinder.name : (existing && existing.grinderId === grinderId ? existing.grinderName : ''),
+    beanId,
+    // Snapshot of the bean name; for a deleted bean keep the old snapshot.
+    beanName: bean ? bean.name : (existing && existing.beanId === beanId ? existing.beanName : ''),
+    grinder: grinderForNote(beanId),
+    grindSetting: str(f.grindSetting.value, TEXT_MAX.short),
     dose,
     yield: yld,
     time,
-    grindSetting: str(f.grindSetting.value, TEXT_MAX.short),
     rating: f.rating.value ? Number(f.rating.value) : null,
     text: str(f.text.value, TEXT_MAX.text),
     createdAt: existing ? existing.createdAt : Date.now(),
@@ -612,23 +706,32 @@ function onNoteSubmit(event) {
 
   saveData();
   $('#note-dialog').close();
-  renderNotes();
+  renderAll();
   showView('notes');
 }
 
-/** Delete a brew note after confirmation. */
-function deleteNote(n) {
-  if (!confirm(`Delete the brew note from ${fmtDate(n.date)}?`)) return;
-  data.notes = data.notes.filter((x) => x.id !== n.id);
+/** Delete the note open in the editor, after confirmation. */
+function deleteNote() {
+  const note = data.notes.find((n) => n.id === editingNoteId);
+  if (!note || !confirm(`Delete the brew note from ${fmtDate(note.date)}?`)) return;
+  data.notes = data.notes.filter((n) => n.id !== note.id);
   saveData();
-  renderNotes();
+  $('#note-dialog').close();
+  renderAll();
 }
 
-/** Show (or clear, with '') an error message inside a dialog form. */
+/** Show (or clear, with '') an error message inside a sheet form. */
 function setFormError(form, message) {
   const p = form.querySelector('.form-error');
   p.textContent = message;
   p.hidden = !message;
+}
+
+/** Open a bottom sheet dialog, scrolled to its top. */
+function openSheet(selector) {
+  const dialog = $(selector);
+  dialog.querySelector('.sheet-body').scrollTop = 0;
+  dialog.showModal();
 }
 
 /* ======================================================================
@@ -659,7 +762,7 @@ async function exportData() {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-/** Validate a chosen backup file and, after confirmation, replace all data with it. */
+/** Validate a chosen backup file (older schema versions are migrated) and, after confirmation, replace all data. */
 async function importFile(file) {
   if (!file) return;
   if (file.size > MAX_IMPORT_BYTES) return showBanner('That file is too large to be a backup. Nothing was changed.', 'error');
@@ -673,10 +776,10 @@ async function importFile(file) {
 
   const incoming = result.data;
   const current = blockedRaw === null
-    ? `ALL current data (${data.grinders.length} grinders, ${data.notes.length} notes)`
+    ? `ALL current data (${data.beans.length} beans, ${data.notes.length} notes)`
     : 'the unreadable stored data';
   const skipped = result.skipped ? `\n\n${result.skipped} invalid entries in the file will be skipped.` : '';
-  const ok = confirm(`Replace ${current} with this backup (${incoming.grinders.length} grinders, ${incoming.notes.length} notes)?${skipped}\n\n`
+  const ok = confirm(`Replace ${current} with this backup (${incoming.beans.length} beans, ${incoming.notes.length} notes)?${skipped}\n\n`
     + 'This cannot be undone. Export first if unsure.');
   if (!ok) return;
 
@@ -689,13 +792,13 @@ async function importFile(file) {
 /** Render the status list on the Data tab. */
 function renderDataStatus() {
   const rows = [
-    ['Grinders', String(data.grinders.length)],
+    ['Beans', String(data.beans.length)],
     ['Brew notes', String(data.notes.length)],
     ['Persistent storage', persistStatus],
-    ['Saving', blockedRaw === null ? 'active' : 'paused (stored data unreadable)'],
+    ['Saving', blockedRaw === null ? 'Active' : 'Paused'],
     ['Schema version', String(SCHEMA_VERSION)],
   ];
-  $('#data-status').replaceChildren(...rows.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
+  $('#data-status').replaceChildren(...rows.map(([k, v]) => el('div', { class: 'row' }, el('dt', {}, k), el('dd', {}, v))));
 }
 
 /* ======================================================================
@@ -703,7 +806,7 @@ function renderDataStatus() {
    ====================================================================== */
 
 // Header title per tab (keys match data-view on the tab buttons and the view-* section ids).
-const VIEW_TITLES = { ratio: 'Ratio', grinders: 'Grinders', notes: 'Brew notes', data: 'Data' };
+const VIEW_TITLES = { ratio: 'Ratio', beans: 'Beans', notes: 'Brew Notes', data: 'Data' };
 let bannerTimer = null; // auto-hide timer for info banners
 
 /** Show one tab's view and hide the others. */
@@ -727,7 +830,7 @@ function showBanner(message, kind = 'info', action = null) {
   const banner = $('#banner');
   banner.replaceChildren(
     el('span', {}, message),
-    action ? el('button', { type: 'button', class: 'btn small', onclick: action.run }, action.label) : null,
+    action ? el('button', { type: 'button', class: 'banner-action', onclick: action.run }, action.label) : null,
     el('button', { type: 'button', class: 'banner-close', 'aria-label': 'Dismiss', onclick: () => { banner.hidden = true; } }, '×'),
   );
   banner.className = `banner ${kind}`;
@@ -756,7 +859,7 @@ function registerServiceWorker() {
 /** Re-render every view from `data`. */
 function renderAll() {
   renderCalc();
-  renderGrinders();
+  renderBeans();
   renderNotes();
   renderDataStatus();
 }
@@ -776,12 +879,14 @@ function init() {
   $$('[data-mode]').forEach((b) => b.addEventListener('click', () => setCalcMode(b.dataset.mode)));
   $('#calc-to-note').addEventListener('click', calcToNote);
 
-  $('#add-grinder').addEventListener('click', () => openGrinderDialog());
-  $('#grinder-form').addEventListener('submit', onGrinderSubmit);
+  $('#add-bean').addEventListener('click', () => openBeanDialog());
+  $('#bean-form').addEventListener('submit', onBeanSubmit);
+  $('#bean-delete').addEventListener('click', deleteBean);
 
   $('#add-note').addEventListener('click', () => openNoteDialog());
   $('#note-form').addEventListener('submit', onNoteSubmit);
   $('#note-form').addEventListener('input', updateNoteForm);
+  $('#note-delete').addEventListener('click', deleteNote);
 
   $$('[data-close]').forEach((b) => b.addEventListener('click', () => b.closest('dialog').close()));
   $$('.tabbar button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));

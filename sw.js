@@ -5,7 +5,7 @@
  */
 'use strict';
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 // All *.github.io project sites share one origin (and one Cache Storage), so every cache
 // name carries this app's prefix and cleanup only touches caches with that prefix.
 const CACHE_PREFIX = 'coffee-app-';

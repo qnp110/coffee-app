@@ -4,15 +4,17 @@
   <meta charset="utf-8">
   <!-- viewport-fit=cover lets the layout use the full screen; style.css pads with env(safe-area-inset-*) -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <!-- Only same-origin scripts/styles; no inline code, no plugins -->
+  <!-- Only same-origin scripts/styles; no inline code, no plugins. data: is allowed for images only. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'self'">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#3b2a20">
+  <!-- Status bar / browser chrome colour, matching --bg in style.css for each theme -->
+  <meta name="theme-color" content="#f6f4f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111013" media="(prefers-color-scheme: dark)">
   <!-- iOS home screen app -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Coffee">
   <title>Coffee Dosing</title>
   <!-- All paths are relative so the app works under /coffee-app/ on GitHub Pages -->
@@ -23,6 +25,7 @@
   <script src="app.js" defer></script>
 </head>
 <body>
+  <!-- Large title bar (translucent, sticky) -->
   <header class="app-header">
     <h1 id="view-title">Ratio</h1>
   </header>
@@ -35,157 +38,210 @@
         <button type="button" data-mode="filter" aria-pressed="false">Filter</button>
       </div>
 
-      <div class="ratio-card" aria-live="polite">
-        <div class="ratio-big" id="ratio-big">1:2</div>
-        <div class="ratio-summary" id="ratio-summary"></div>
+      <div class="hero" aria-live="polite">
+        <div class="hero-label">Brew ratio</div>
+        <div class="hero-ratio" id="ratio-big">1:2</div>
+        <div class="hero-summary" id="ratio-summary"></div>
       </div>
 
-      <div class="card">
-        <label class="field">
-          <span class="label">Dose (coffee)</span>
-          <span class="input-unit">
-            <input id="calc-dose" data-field="dose" type="text" inputmode="decimal" autocomplete="off">
-            <span class="unit">g</span>
-          </span>
+      <!-- Inputs as an inset grouped list: label left, value right -->
+      <div class="group">
+        <label class="row">
+          <span class="row-label">Dose</span>
+          <input id="calc-dose" class="row-input num" data-field="dose" type="text" inputmode="decimal" autocomplete="off">
+          <span class="row-unit">g</span>
         </label>
-        <label class="field">
-          <span class="label" id="calc-target-label">Yield (in cup)</span>
-          <span class="input-unit">
-            <input id="calc-target" data-field="target" type="text" inputmode="decimal" autocomplete="off">
-            <span class="unit">g</span>
-          </span>
+        <label class="row">
+          <span class="row-label" id="calc-target-label">Yield</span>
+          <input id="calc-target" class="row-input num" data-field="target" type="text" inputmode="decimal" autocomplete="off">
+          <span class="row-unit">g</span>
         </label>
-        <label class="field">
-          <span class="label">Ratio</span>
-          <span class="input-unit">
-            <span class="unit">1:</span>
-            <input id="calc-ratio" data-field="ratio" type="text" inputmode="decimal" autocomplete="off">
-            <span class="unit"></span>
-          </span>
+        <label class="row">
+          <span class="row-label">Ratio</span>
+          <span class="row-prefix">1 :</span>
+          <input id="calc-ratio" class="row-input num" data-field="ratio" type="text" inputmode="decimal" autocomplete="off">
+          <span class="row-unit"></span>
         </label>
-        <label class="field filter-only" hidden>
-          <span class="label">Absorption</span>
-          <span class="input-unit">
-            <input id="calc-absorption" data-field="absorption" type="text" inputmode="decimal" autocomplete="off">
-            <span class="unit">g/g</span>
-          </span>
-          <small class="muted">Water retained by the grounds, about 2 g per g of coffee.</small>
+        <label class="row filter-only" hidden>
+          <span class="row-label">Absorption</span>
+          <input id="calc-absorption" class="row-input num" data-field="absorption" type="text" inputmode="decimal" autocomplete="off">
+          <span class="row-unit">g/g</span>
         </label>
       </div>
+      <p class="group-footer hint" id="calc-hint" role="status"></p>
+      <p class="group-footer filter-only" hidden>Absorption is the water retained by the grounds, about 2 g per g of coffee.</p>
+      <p class="group-footer">Changing the dose keeps the ratio. Changing yield, water or ratio updates the other.</p>
 
-      <p class="hint" id="calc-hint" role="status"></p>
-      <p class="muted small">Changing the dose keeps the ratio. Changing yield/water or the ratio updates the other one.</p>
-      <button type="button" id="calc-to-note" class="btn block">Log as brew note</button>
+      <button type="button" id="calc-to-note" class="btn">Log as brew note</button>
     </section>
 
-    <!-- ===== Grinders ===== -->
-    <section id="view-grinders" class="view" hidden>
-      <button type="button" id="add-grinder" class="btn primary block">+ Add grinder</button>
-      <ul id="grinder-list" class="card-list"></ul>
-      <p id="grinder-empty" class="empty">No grinders yet.</p>
+    <!-- ===== Beans ===== -->
+    <section id="view-beans" class="view" hidden>
+      <button type="button" id="add-bean" class="btn">Add bean</button>
+      <ul id="bean-list" class="card-list"></ul>
+      <p id="bean-empty" class="empty">No beans yet. Add the coffee you are brewing, with its grinder and settings.</p>
     </section>
 
     <!-- ===== Brew notes ===== -->
     <section id="view-notes" class="view" hidden>
-      <button type="button" id="add-note" class="btn primary block">+ Add brew note</button>
+      <button type="button" id="add-note" class="btn">Add brew note</button>
       <ul id="note-list" class="card-list"></ul>
       <p id="note-empty" class="empty">No brew notes yet.</p>
     </section>
 
     <!-- ===== Data / backup ===== -->
     <section id="view-data" class="view" hidden>
-      <div class="card">
-        <h2>Backup</h2>
-        <p class="muted">Your data is stored only on this device. Export a backup now and then.</p>
-        <button type="button" id="export-btn" class="btn primary block">Export backup (JSON)</button>
-        <button type="button" id="import-btn" class="btn block">Import backup…</button>
-        <input type="file" id="import-file" accept="application/json,.json" hidden>
+      <h2 class="group-header">Backup</h2>
+      <div class="group">
+        <button type="button" id="export-btn" class="row row-button">Export backup</button>
+        <button type="button" id="import-btn" class="row row-button">Import backup…</button>
       </div>
-      <div class="card">
-        <h2>Status</h2>
-        <dl id="data-status" class="status"></dl>
-      </div>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+      <p class="group-footer">Your data is stored only on this device. Export a backup now and then and keep it in Files or iCloud Drive.</p>
+
+      <h2 class="group-header">Status</h2>
+      <dl id="data-status" class="group"></dl>
     </section>
   </main>
 
   <div id="banner" class="banner" role="status" hidden></div>
 
+  <!-- Tab bar; icons are simple inline line drawings using the current text colour -->
   <nav class="tabbar" aria-label="Sections">
-    <button type="button" data-view="ratio"><span class="icon" aria-hidden="true">⚖️</span>Ratio</button>
-    <button type="button" data-view="grinders"><span class="icon" aria-hidden="true">⚙️</span>Grinders</button>
-    <button type="button" data-view="notes"><span class="icon" aria-hidden="true">📝</span>Notes</button>
-    <button type="button" data-view="data"><span class="icon" aria-hidden="true">💾</span>Data</button>
+    <button type="button" data-view="ratio">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M18 6 6 18"/></svg>
+      <span>Ratio</span>
+    </button>
+    <button type="button" data-view="beans">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="6.5" ry="9" transform="rotate(35 12 12)"/><path d="M16.5 5.5c-3 2.5-2 5-4.5 6.5s-3.5 1.5-4.5 6"/></svg>
+      <span>Beans</span>
+    </button>
+    <button type="button" data-view="notes">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="2.5"/><path d="M9 8.5h6M9 12h6M9 15.5h4"/></svg>
+      <span>Notes</span>
+    </button>
+    <button type="button" data-view="data">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4"/><path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg>
+      <span>Data</span>
+    </button>
   </nav>
 
-  <!-- ===== Grinder editor ===== -->
-  <dialog id="grinder-dialog" aria-labelledby="grinder-dialog-title">
-    <form id="grinder-form" novalidate>
-      <h2 id="grinder-dialog-title">Grinder</h2>
-      <label class="field">
-        <span class="label">Name</span>
-        <input name="name" type="text" maxlength="100" autocomplete="off" required>
-      </label>
-      <label class="field">
-        <span class="label">Settings (one per line)</span>
-        <textarea name="settings" rows="6" placeholder="Espresso: 14&#10;V60: 22 clicks"></textarea>
-      </label>
-      <p class="form-error" role="alert" hidden></p>
-      <div class="dialog-actions">
-        <button type="button" class="btn" data-close>Cancel</button>
-        <button type="submit" class="btn primary">Save</button>
+  <!-- ===== Bean editor (bottom sheet) ===== -->
+  <dialog id="bean-dialog" class="sheet" aria-labelledby="bean-dialog-title">
+    <form id="bean-form" novalidate>
+      <div class="sheet-bar">
+        <button type="button" class="bar-btn" data-close>Cancel</button>
+        <h2 id="bean-dialog-title">New bean</h2>
+        <button type="submit" class="bar-btn strong">Save</button>
+      </div>
+      <div class="sheet-body">
+        <div class="group">
+          <label class="row">
+            <span class="row-label">Name</span>
+            <input name="name" class="row-input text" type="text" maxlength="100" autocomplete="off" placeholder="Required">
+          </label>
+          <label class="row">
+            <span class="row-label">Grinder</span>
+            <input name="grinder" class="row-input text" type="text" list="grinder-options" maxlength="100" autocomplete="off" placeholder="e.g. Niche Zero">
+          </label>
+        </div>
+        <datalist id="grinder-options"></datalist>
+
+        <h3 class="group-header" id="bean-settings-label">Grind settings</h3>
+        <div class="group">
+          <textarea name="settings" rows="4" aria-labelledby="bean-settings-label" placeholder="One per line, e.g.&#10;Espresso: 14&#10;V60: 22 clicks"></textarea>
+        </div>
+
+        <h3 class="group-header" id="bean-info-label">Bean info</h3>
+        <div class="group">
+          <textarea name="info" rows="3" maxlength="5000" aria-labelledby="bean-info-label" placeholder="Roaster, origin, process, roast date…"></textarea>
+        </div>
+
+        <h3 class="group-header" id="bean-notes-label">Notes</h3>
+        <div class="group">
+          <textarea name="notes" rows="3" maxlength="5000" aria-labelledby="bean-notes-label" placeholder="Taste, what worked, what didn't…"></textarea>
+        </div>
+
+        <p class="form-error" role="alert" hidden></p>
+        <div class="group edit-only">
+          <button type="button" id="bean-delete" class="row row-button danger">Delete bean</button>
+        </div>
       </div>
     </form>
   </dialog>
 
-  <!-- ===== Brew note editor ===== -->
-  <dialog id="note-dialog" aria-labelledby="note-dialog-title">
+  <!-- ===== Brew note editor (bottom sheet) ===== -->
+  <dialog id="note-dialog" class="sheet" aria-labelledby="note-dialog-title">
     <form id="note-form" novalidate>
-      <h2 id="note-dialog-title">Brew note</h2>
-      <label class="field">
-        <span class="label">Date</span>
-        <input name="date" type="date" required>
-      </label>
-      <label class="field">
-        <span class="label">Grinder</span>
-        <select name="grinderId"></select>
-      </label>
-      <label class="field">
-        <span class="label">Grind setting</span>
-        <input name="grindSetting" type="text" list="grind-setting-options" maxlength="100" autocomplete="off">
-      </label>
-      <datalist id="grind-setting-options"></datalist>
-      <div class="row">
-        <label class="field">
-          <span class="label">Dose (g)</span>
-          <input name="dose" type="text" inputmode="decimal" autocomplete="off">
-        </label>
-        <label class="field">
-          <span class="label">Yield (g)</span>
-          <input name="yield" type="text" inputmode="decimal" autocomplete="off">
-        </label>
+      <div class="sheet-bar">
+        <button type="button" class="bar-btn" data-close>Cancel</button>
+        <h2 id="note-dialog-title">New brew note</h2>
+        <button type="submit" class="bar-btn strong">Save</button>
       </div>
-      <label class="field">
-        <span class="label">Time (seconds or m:ss)</span>
-        <input name="time" type="text" autocomplete="off" placeholder="28 or 3:30">
-      </label>
-      <p class="muted small" id="note-ratio"></p>
-      <fieldset class="rating">
-        <legend class="label">Rating</legend>
-        <label><input type="radio" name="rating" value="" checked><span aria-label="No rating">–</span></label>
-        <label><input type="radio" name="rating" value="1"><span>1</span></label>
-        <label><input type="radio" name="rating" value="2"><span>2</span></label>
-        <label><input type="radio" name="rating" value="3"><span>3</span></label>
-        <label><input type="radio" name="rating" value="4"><span>4</span></label>
-        <label><input type="radio" name="rating" value="5"><span>5</span></label>
-      </fieldset>
-      <label class="field">
-        <span class="label">Notes</span>
-        <textarea name="text" rows="4" maxlength="5000"></textarea>
-      </label>
-      <p class="form-error" role="alert" hidden></p>
-      <div class="dialog-actions">
-        <button type="button" class="btn" data-close>Cancel</button>
-        <button type="submit" class="btn primary">Save</button>
+      <div class="sheet-body">
+        <div class="group">
+          <label class="row">
+            <span class="row-label">Date</span>
+            <input name="date" class="row-input" type="date" required>
+          </label>
+          <label class="row">
+            <span class="row-label">Bean</span>
+            <select name="beanId" class="row-input"></select>
+          </label>
+          <div class="row">
+            <span class="row-label">Grinder</span>
+            <span class="row-value" id="note-grinder">–</span>
+          </div>
+          <label class="row">
+            <span class="row-label">Grind setting</span>
+            <input name="grindSetting" class="row-input text" type="text" list="grind-setting-options" maxlength="100" autocomplete="off">
+          </label>
+        </div>
+        <datalist id="grind-setting-options"></datalist>
+
+        <div class="group group-spaced">
+          <label class="row">
+            <span class="row-label">Dose</span>
+            <input name="dose" class="row-input num" type="text" inputmode="decimal" autocomplete="off">
+            <span class="row-unit">g</span>
+          </label>
+          <label class="row">
+            <span class="row-label">Yield</span>
+            <input name="yield" class="row-input num" type="text" inputmode="decimal" autocomplete="off">
+            <span class="row-unit">g</span>
+          </label>
+          <label class="row">
+            <span class="row-label">Time</span>
+            <input name="time" class="row-input num" type="text" autocomplete="off" placeholder="28 or 3:30">
+            <span class="row-unit"></span>
+          </label>
+          <div class="row">
+            <span class="row-label">Ratio</span>
+            <span class="row-value" id="note-ratio">–</span>
+          </div>
+        </div>
+
+        <fieldset class="rating-field">
+          <legend class="group-header">Rating</legend>
+          <div class="rating">
+            <label><input type="radio" name="rating" value="" checked><span aria-label="No rating">–</span></label>
+            <label><input type="radio" name="rating" value="1"><span>1</span></label>
+            <label><input type="radio" name="rating" value="2"><span>2</span></label>
+            <label><input type="radio" name="rating" value="3"><span>3</span></label>
+            <label><input type="radio" name="rating" value="4"><span>4</span></label>
+            <label><input type="radio" name="rating" value="5"><span>5</span></label>
+          </div>
+        </fieldset>
+
+        <h3 class="group-header" id="note-text-label">Notes</h3>
+        <div class="group">
+          <textarea name="text" rows="4" maxlength="5000" aria-labelledby="note-text-label" placeholder="Taste, adjustments for next time…"></textarea>
+        </div>
+
+        <p class="form-error" role="alert" hidden></p>
+        <div class="group edit-only">
+          <button type="button" id="note-delete" class="row row-button danger">Delete brew note</button>
+        </div>
       </div>
     </form>
   </dialog>
